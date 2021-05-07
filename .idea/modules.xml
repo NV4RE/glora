@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/gola.iml" filepath="$PROJECT_DIR$/.idea/gola.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../glora/.idea/glora.iml" filepath="$PROJECT_DIR$/../glora/.idea/glora.iml" />
     </modules>
   </component>
 </project>
