@@ -2,6 +2,7 @@ package glora
 
 import (
 	"errors"
+	"log"
 	"periph.io/x/conn/v3/driver/driverreg"
 	"periph.io/x/conn/v3/gpio"
 	"periph.io/x/conn/v3/gpio/gpioreg"
@@ -13,7 +14,8 @@ import (
 )
 
 var (
-	ErrGetVersion = errors.New("version not matched")
+	ErrGetVersion  = errors.New("version not matched")
+	ErrDIO0Timeout = errors.New("dio 0 timeout")
 )
 
 type Message struct {
@@ -395,23 +397,57 @@ func (l *Lora) Receive(timeout time.Duration) ([]byte, error) {
 	return nil, nil
 }
 
-func (l *Lora) Transmit(b []byte, t time.Duration) error {
-	err := l.WriteRegister(RegFifoAddrPtr, 0)
+func (l *Lora) Transmit(bytes []byte, timeout time.Duration) error {
+	_, err := l.ClearIrqFlags()
 	if err != nil {
 		return err
 	}
 
-	err = l.WriteRegister(RegPayloadLength, uint8(len(b)))
+	err = l.WriteRegister(RegFifoAddrPtr, 0)
 	if err != nil {
 		return err
 	}
 
-	err = l.WriteRegister(RegFifo, b...)
+	err = l.WriteRegister(RegPayloadLength, uint8(len(bytes)))
+
 	if err != nil {
 		return err
 	}
 
-	return nil
+	err = l.WriteRegister(RegFifo, bytes...)
+	if err != nil {
+		return err
+	}
+
+	wc := make(chan error)
+	defer close(wc)
+	go func() {
+		raise := l.DI0.WaitForEdge(timeout)
+		if raise {
+			wc <- nil
+		} else {
+			wc <- ErrDIO0Timeout
+		}
+	}()
+
+	err = l.WriteRegister(RegDioMapping1, 0x40)
+	if err != nil {
+		return err
+	}
+
+	err = l.SetMode(ModeTx)
+	if err != nil {
+		return err
+	}
+
+	m, err := l.ReadRegister(RegOpMode)
+	if err != nil {
+		return err
+	}
+
+	log.Println(m, ModeLongRange|ModeTx, ModeTx)
+
+	return <-wc
 }
 
 func (l *Lora) ExplicitHeaderMode() error {
@@ -432,8 +468,8 @@ func (l *Lora) ImplicitHeaderMode() error {
 	return l.WriteRegister(RegModemConfig1, mc1&0x01)
 }
 
-func (l *Lora) ReadRegister(a Register) (byte, error) {
-	b := []byte{byte(a) & 0x7f, 0x00}
+func (l *Lora) ReadRegister(reg Register) (byte, error) {
+	b := []byte{byte(reg) & 0x7f, 0x00}
 	read := make([]byte, len(b))
 	err := l.SPI.Tx(b, read)
 	if err != nil {
@@ -442,8 +478,8 @@ func (l *Lora) ReadRegister(a Register) (byte, error) {
 	return read[1], nil
 }
 
-func (l *Lora) ReadRegisterBytes(a Register, n int) ([]byte, error) {
-	b := append([]byte{byte(a) & 0x7f, 0x00}, make([]byte, n)...)
+func (l *Lora) ReadRegisterBytes(reg Register, number int) ([]byte, error) {
+	b := append([]byte{byte(reg) & 0x7f, 0x00}, make([]byte, number)...)
 	read := make([]byte, len(b))
 	err := l.SPI.Tx(b, read)
 	if err != nil {
@@ -452,6 +488,6 @@ func (l *Lora) ReadRegisterBytes(a Register, n int) ([]byte, error) {
 	return read[1:], nil
 }
 
-func (l *Lora) WriteRegister(a Register, v ...byte) error {
-	return l.SPI.Tx(append([]byte{byte(a) | 0x80}, v...), make([]byte, 2))
+func (l *Lora) WriteRegister(reg Register, bytes ...byte) error {
+	return l.SPI.Tx(append([]byte{byte(reg) | 0x80}, bytes...), make([]byte, len(bytes)+1))
 }
