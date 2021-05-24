@@ -440,7 +440,8 @@ func (l *Lora) GetIrqRxDone(limit int) (byte, error) {
 			return irq, err
 		}
 		if irq&IrqRxDoneMask == 0 {
-			time.Sleep(time.Millisecond)
+			fmt.Printf("wait rx: %d\n", i)
+			time.Sleep(time.Millisecond * 3)
 			continue
 		} else {
 			return irq, nil
@@ -478,7 +479,7 @@ func (l *Lora) ReceiveContinue(ctx context.Context, timeout time.Duration, msg c
 		default:
 			raise := l.DI0.WaitForEdge(timeout)
 			if raise {
-				_, err := l.GetIrqRxDone(5)
+				_, err := l.GetIrqRxDone(10)
 				if err != nil {
 					return err
 				}
