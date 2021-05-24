@@ -1,4 +1,4 @@
-module glora
+module github.com/NV4RE/glora
 
 go 1.16
 

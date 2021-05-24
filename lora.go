@@ -1,4 +1,13 @@
-package glora
+package github
+
+import (
+	"errors"
+	"periph.io/x/conn/v3/gpio"
+	"periph.io/x/conn/v3/spi"
+	"periph.io/x/host/v3"
+)
+
+.com/NV4RE/glora
 
 import (
 	"context"
