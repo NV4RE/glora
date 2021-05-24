@@ -421,12 +421,32 @@ func (l *Lora) GetMessage() (*Message, error) {
 }
 
 func (l *Lora) ClearIrqFlags() (byte, error) {
-	irq, err := l.ReadRegister(RegIrqFlags)
+	irq, err := l.GetIrqFlags()
 	if err != nil {
 		return 0, err
 	}
 
 	return irq, l.WriteRegister(RegIrqFlags, irq)
+}
+
+func (l *Lora) GetIrqFlags() (byte, error) {
+	return l.ReadRegister(RegIrqFlags)
+}
+
+func (l *Lora) GetIrqRxDone(limit int) (byte, error) {
+	for i := 0; i < limit; i++ {
+		irq, err := l.ReadRegister(RegIrqFlags)
+		if err != nil {
+			return irq, err
+		}
+		if irq&IrqRxDoneMask == 0 {
+			time.Sleep(time.Millisecond)
+			continue
+		} else {
+			return irq, nil
+		}
+	}
+	return 0, ErrRxNotDone
 }
 
 func (l *Lora) ReceiveContinue(ctx context.Context, timeout time.Duration, msg chan *Message) error {
@@ -458,6 +478,11 @@ func (l *Lora) ReceiveContinue(ctx context.Context, timeout time.Duration, msg c
 		default:
 			raise := l.DI0.WaitForEdge(timeout)
 			if raise {
+				_, err := l.GetIrqRxDone(5)
+				if err != nil {
+					return err
+				}
+
 				irqFlags, err := l.ClearIrqFlags()
 				if err != nil {
 					return err
@@ -465,10 +490,6 @@ func (l *Lora) ReceiveContinue(ctx context.Context, timeout time.Duration, msg c
 
 				if irqFlags&IrqPayloadCrcErrorMask != 0 {
 					return ErrCrcNotMatched
-				}
-
-				if irqFlags&IrqRxDoneMask == 0 {
-					return ErrRxNotDone
 				}
 
 				m, err := l.GetMessage()
