@@ -1,4 +1,4 @@
-package github.com/NV4RE/glora
+package glora
 
 type Mode byte
 type Register byte
