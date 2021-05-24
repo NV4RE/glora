@@ -1,7 +1,9 @@
 package glora
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log"
 	"periph.io/x/conn/v3/driver/driverreg"
 	"periph.io/x/conn/v3/gpio"
@@ -14,19 +16,23 @@ import (
 )
 
 var (
-	ErrGetVersion  = errors.New("version not matched")
-	ErrDIO0Timeout = errors.New("dio 0 timeout")
+	ErrGetVersion     = errors.New("version not matched")
+	ErrDIO0Timeout    = errors.New("dio 0 timeout")
+	ErrReceiveTimeout = errors.New("receive timeout")
+	ErrRxNotDone      = errors.New("ex not done")
+	ErrCrcNotMatched  = errors.New("crc not matched")
 )
 
 type Message struct {
-	data []byte
-	rssi int
-	snr  float64
+	Data []byte
+	RSSI int
+	SNR  float64
 }
 
 type Lora struct {
 	SPI                spi.Conn
 	DI0                gpio.PinIO
+	Reset              gpio.PinIO
 	implicitHeaderMode bool
 	spreadingFactor    uint8
 	signalBandwidth    uint64
@@ -39,7 +45,7 @@ type Lora struct {
 	MessageCh          chan Message
 }
 
-func NewLora(spiDev, di0 string) (*Lora, error) {
+func NewLora(spiDev, di0, rst string) (*Lora, error) {
 	if _, err := host.Init(); err != nil {
 		return nil, err
 	}
@@ -54,7 +60,7 @@ func NewLora(spiDev, di0 string) (*Lora, error) {
 		return nil, err
 	}
 
-	c, err := p.Connect(physic.MegaHertz, spi.Mode3, 8)
+	c, err := p.Connect(8*physic.MegaHertz, spi.Mode0, 8)
 	if err != nil {
 		return nil, err
 	}
@@ -65,16 +71,33 @@ func NewLora(spiDev, di0 string) (*Lora, error) {
 
 	dio0 := gpioreg.ByName(di0)
 	if p == nil {
-		return nil, errors.New("failed to find GPIO6")
+		return nil, errors.New("failed to find DIO0 pin")
 	}
 
-	if err := dio0.In(gpio.PullNoChange, gpio.RisingEdge); err != nil {
+	if err := dio0.In(gpio.PullDown, gpio.RisingEdge); err != nil {
 		return nil, err
 	}
+
+	reset := gpioreg.ByName(rst)
+	if reset == nil {
+		return nil, errors.New("failed to find RESET pin")
+	}
+
+	if err := reset.Out(gpio.High); err != nil {
+		return nil, err
+	}
+
+	//go func() {
+	//	for {
+	//		raise := dio0.WaitForEdge(-1)
+	//		fmt.Printf("dio0 change: %t", raise)
+	//	}
+	//}()
 
 	return &Lora{
 		SPI:                c,
 		DI0:                dio0,
+		Reset:              reset,
 		implicitHeaderMode: false,
 		spreadingFactor:    7,
 		signalBandwidth:    125e3,
@@ -88,11 +111,17 @@ func NewLora(spiDev, di0 string) (*Lora, error) {
 }
 
 func (l *Lora) Config() error {
+	err := l.ResetLora()
+	if err != nil {
+		return err
+	}
+
 	v, err := l.GetVersion()
 	if err != nil {
 		return err
 	}
 	if v != 0x12 {
+		fmt.Printf("expect 0x12 found 0x%x\n", v)
 		return ErrGetVersion
 	}
 
@@ -121,10 +150,10 @@ func (l *Lora) Config() error {
 	//	return err
 	//}
 	//
-	//err = l.SetCrc(l.crc)
-	//if err != nil {
-	//	return err
-	//}
+	err = l.SetCrc(l.crc)
+	if err != nil {
+		return err
+	}
 
 	err = l.WriteRegister(RegFifoTxBaseAddr, 0)
 	if err != nil {
@@ -151,6 +180,17 @@ func (l *Lora) Config() error {
 	}
 
 	return l.SetMode(ModeStandby)
+}
+
+func (l *Lora) ResetLora() error {
+	err := l.Reset.Out(gpio.Low)
+	if err != nil {
+		return err
+	}
+	time.Sleep(10 * time.Millisecond)
+	err = l.Reset.Out(gpio.High)
+	time.Sleep(10 * time.Millisecond)
+	return err
 }
 
 func (l *Lora) GetVersion() (byte, error) {
@@ -308,6 +348,22 @@ func (l *Lora) SetCrc(crc bool) error {
 }
 
 func (l *Lora) GetFIFO() ([]byte, error) {
+	var (
+		pl  byte
+		err error
+	)
+	if l.implicitHeaderMode {
+		pl, err = l.ReadRegister(RegPayloadLength)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		pl, err = l.ReadRegister(RegRxNbBytes)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	rxAddr, err := l.ReadRegister(RegFifoRxCurrentAddr)
 	if err != nil {
 		return nil, err
@@ -318,32 +374,19 @@ func (l *Lora) GetFIFO() ([]byte, error) {
 		return nil, err
 	}
 
-	var nbBytes byte
-	if l.implicitHeaderMode {
-		nbBytes, err = l.ReadRegister(RegPayloadLength)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		nbBytes, err = l.ReadRegister(RegRxNbBytes)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return l.ReadRegisterBytes(RegFifo, int(nbBytes))
+	return l.ReadRegisterBytes(RegFifo, int(pl)-1)
 }
 
-func (l *Lora) GetRssi() (uint8, error) {
+func (l *Lora) GetRssi() (int, error) {
 	rssi, err := l.ReadRegister(RegPktRssiValue)
 	if err != nil {
 		return 0, err
 	}
 
-	if l.frequency < 868e6 {
-		return rssi - 164, nil
+	if l.frequency < 525e6 {
+		return int(rssi) - 164, nil
 	}
-	return rssi - 157, nil
+	return int(rssi) - 157, nil
 }
 
 func (l *Lora) GetSNR() (float64, error) {
@@ -352,6 +395,29 @@ func (l *Lora) GetSNR() (float64, error) {
 		return 0, err
 	}
 	return float64(snr) * 0.25, nil
+}
+
+func (l *Lora) GetMessage() (*Message, error) {
+	b, err := l.GetFIFO()
+	if err != nil {
+		return nil, err
+	}
+
+	rssi, err := l.GetRssi()
+	if err != nil {
+		return nil, err
+	}
+
+	snr, err := l.GetSNR()
+	if err != nil {
+		return nil, err
+	}
+
+	return &Message{
+		Data: b,
+		RSSI: rssi,
+		SNR:  snr,
+	}, nil
 }
 
 func (l *Lora) ClearIrqFlags() (byte, error) {
@@ -363,42 +429,68 @@ func (l *Lora) ClearIrqFlags() (byte, error) {
 	return irq, l.WriteRegister(RegIrqFlags, irq)
 }
 
-func (l *Lora) Receive(timeout time.Duration) ([]byte, error) {
-	err := l.ExplicitHeaderMode()
+func (l *Lora) ReceiveContinue(ctx context.Context, timeout time.Duration, msg chan *Message) error {
+	_, err := l.ClearIrqFlags()
 	if err != nil {
-		return nil, err
-	}
-
-	_, err = l.ClearIrqFlags()
-	if err != nil {
-		return nil, err
-	}
-
-	err = l.WriteRegister(RegRxNbBytes, 0)
-	if err != nil {
-		return nil, err
+		return err
 	}
 
 	err = l.WriteRegister(RegDioMapping1, 0x00)
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	err = l.ExplicitHeaderMode()
+	if err != nil {
+		return err
 	}
 
 	err = l.SetMode(ModeRxContinuous)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer l.SetMode(ModeStandby)
 
-	raise := l.DI0.WaitForEdge(timeout)
-	if raise {
-		return l.GetFIFO()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			raise := l.DI0.WaitForEdge(timeout)
+			if raise {
+				irqFlags, err := l.ClearIrqFlags()
+				if err != nil {
+					return err
+				}
+
+				if irqFlags&IrqPayloadCrcErrorMask != 0 {
+					return ErrCrcNotMatched
+				}
+
+				if irqFlags&IrqRxDoneMask == 0 {
+					return ErrRxNotDone
+				}
+
+				m, err := l.GetMessage()
+				if err != nil {
+					return err
+				}
+
+				msg <- m
+			} else {
+				return ErrReceiveTimeout
+			}
+		}
 	}
-	return nil, nil
 }
 
 func (l *Lora) Transmit(bytes []byte, timeout time.Duration) error {
-	_, err := l.ClearIrqFlags()
+	err := l.ImplicitHeaderMode()
+	if err != nil {
+		return err
+	}
+
+	_, err = l.ClearIrqFlags()
 	if err != nil {
 		return err
 	}
@@ -444,7 +536,6 @@ func (l *Lora) Transmit(bytes []byte, timeout time.Duration) error {
 	if err != nil {
 		return err
 	}
-
 	log.Println(m, ModeLongRange|ModeTx, ModeTx)
 
 	return <-wc
