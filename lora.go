@@ -19,7 +19,7 @@ var (
 	ErrGetVersion     = errors.New("version not matched")
 	ErrDIO0Timeout    = errors.New("dio 0 timeout")
 	ErrReceiveTimeout = errors.New("receive timeout")
-	ErrRxNotDone      = errors.New("ex not done")
+	ErrRxNotDone      = errors.New("rx not done")
 	ErrCrcNotMatched  = errors.New("crc not matched")
 )
 
